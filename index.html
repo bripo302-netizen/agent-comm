@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Comm — Audit Trail</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  :root {
+    --bg-0: #0b0e17;
+    --bg-1: #111827;
+    --bg-2: #1a2035;
+    --bg-3: #243049;
+    --border: #2d3a54;
+    --border-active: #f5a623;
+    --text: #e2e8f0;
+    --text-dim: #8892a8;
+    --accent-orange: #f5a623;
+    --accent-blue: #4fc3f7;
+    --accent-green: #81c784;
+    --accent-purple: #ce93d8;
+    --accent-red: #ef5350;
+    --sent: #f5a623;
+    --delivered: #4fc3f7;
+    --read: #81c784;
+    --executed: #ce93d8;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg-0);
+    color: var(--text);
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ─── Header ─── */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 20px;
+    background: var(--bg-1);
+    border-bottom: 1px solid var(--border);
+    height: 50px;
+    flex-shrink: 0;
+  }
+  .header h1 { font-size: 16px; color: var(--accent-orange); font-weight: 700; }
+  .header-right { display: flex; align-items: center; gap: 12px; }
+  #conn-status { font-size: 12px; display: flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot-online { background: var(--accent-green); }
+  .dot-offline { background: var(--accent-red); }
+  .btn-sm {
+    padding: 4px 12px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--bg-2); color: var(--text-dim); cursor: pointer; font-size: 11px;
+  }
+  .btn-sm:hover { border-color: var(--accent-orange); color: var(--text); }
+
+  /* ─── Config Banner ─── */
+  .config-banner {
+    display: none; padding: 8px 20px; background: var(--bg-2);
+    border-bottom: 1px solid var(--border); align-items: center; gap: 10px;
+    flex-shrink: 0;
+  }
+  .config-banner.show { display: flex; }
+  .config-banner label { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+  .config-banner input {
+    flex: 1; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--bg-1); color: var(--text); font-size: 12px;
+  }
+  .config-banner button {
+    padding: 6px 16px; border-radius: 6px; border: none;
+    background: var(--accent-green); color: #111; font-weight: 600; cursor: pointer;
+  }
+
+  /* ─── Stats Bar ─── */
+  .stats-bar {
+    display: flex; gap: 16px; padding: 8px 20px; background: var(--bg-1);
+    border-bottom: 1px solid var(--border); flex-shrink: 0; align-items: center;
+  }
+  .stat {
+    display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim);
+  }
+  .stat-value { font-weight: 700; color: var(--text); font-size: 14px; }
+  .stat-dot { width: 8px; height: 8px; border-radius: 50%; }
+
+  /* Filter bar */
+  .filter-bar {
+    display: flex; gap: 8px; padding: 8px 20px; background: var(--bg-2);
+    border-bottom: 1px solid var(--border); flex-shrink: 0; align-items: center;
+  }
+  .filter-btn {
+    padding: 4px 12px; border-radius: 12px; border: 1px solid var(--border);
+    background: transparent; color: var(--text-dim); cursor: pointer; font-size: 11px;
+    transition: all 0.15s;
+  }
+  .filter-btn:hover { border-color: var(--accent-blue); color: var(--text); }
+  .filter-btn.active { border-color: var(--accent-orange); color: var(--accent-orange); background: rgba(245,166,35,0.1); }
+  .filter-spacer { flex: 1; }
+  .msg-count { font-size: 11px; color: var(--text-dim); }
+
+  /* ─── Timeline ─── */
+  .timeline-wrap {
+    flex: 1; overflow-y: auto; padding: 16px 20px;
+    scrollbar-width: thin; scrollbar-color: var(--bg-3) transparent;
+  }
+  .timeline-wrap::-webkit-scrollbar { width: 6px; }
+  .timeline-wrap::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 3px; }
+
+  .timeline { max-width: 900px; margin: 0 auto; position: relative; }
+
+  /* Vertical line */
+  .timeline::before {
+    content: ''; position: absolute; left: 20px; top: 0; bottom: 0;
+    width: 2px; background: var(--border);
+  }
+
+  .msg-card {
+    position: relative; margin-left: 48px; margin-bottom: 12px;
+    padding: 12px 16px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg-1); transition: border-color 0.15s;
+  }
+  .msg-card:hover { border-color: var(--border-active); }
+
+  /* Timeline dot */
+  .msg-card::before {
+    content: ''; position: absolute; left: -36px; top: 16px;
+    width: 10px; height: 10px; border-radius: 50%;
+    border: 2px solid var(--border); background: var(--bg-0);
+  }
+  .msg-card.status-sent::before { border-color: var(--sent); background: var(--sent); }
+  .msg-card.status-delivered::before { border-color: var(--delivered); background: var(--delivered); }
+  .msg-card.status-read::before { border-color: var(--read); background: var(--read); }
+  .msg-card.status-executed::before { border-color: var(--executed); background: var(--executed); }
+
+  /* Connector line from dot to card */
+  .msg-card::after {
+    content: ''; position: absolute; left: -26px; top: 20px;
+    width: 26px; height: 2px; background: var(--border);
+  }
+
+  .msg-header {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap;
+  }
+  .agent-badge {
+    padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;
+  }
+  .agent-CL { background: rgba(79,195,247,0.15); color: var(--accent-blue); }
+  .agent-CE { background: rgba(206,147,216,0.15); color: var(--accent-purple); }
+  .agent-ORCHESTRATOR { background: rgba(245,166,35,0.15); color: var(--accent-orange); }
+
+  .direction-arrow { font-size: 14px; color: var(--text-dim); }
+
+  .status-badge {
+    padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .status-sent { background: rgba(245,166,35,0.15); color: var(--sent); }
+  .status-delivered { background: rgba(79,195,247,0.15); color: var(--delivered); }
+  .status-read { background: rgba(129,199,132,0.15); color: var(--read); }
+  .status-executed { background: rgba(206,147,216,0.15); color: var(--executed); }
+
+  .priority-badge {
+    padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 700;
+    background: rgba(239,83,80,0.2); color: var(--accent-red);
+  }
+
+  .channel-badge {
+    font-size: 10px; color: var(--text-dim); padding: 2px 6px;
+    border: 1px solid var(--border); border-radius: 4px;
+  }
+
+  .msg-content {
+    font-size: 13px; line-height: 1.5; color: var(--text);
+    white-space: pre-wrap; word-break: break-word;
+  }
+
+  .msg-footer {
+    display: flex; align-items: center; gap: 12px; margin-top: 8px;
+    font-size: 11px; color: var(--text-dim);
+  }
+  .msg-id { font-family: monospace; font-size: 10px; opacity: 0.6; cursor: pointer; }
+  .msg-id:hover { opacity: 1; color: var(--accent-orange); }
+
+  /* Empty state */
+  .empty-state {
+    text-align: center; padding: 80px 20px; color: var(--text-dim);
+  }
+  .empty-state h2 { font-size: 18px; margin-bottom: 8px; color: var(--text); }
+  .empty-state p { font-size: 13px; }
+
+  /* ─── Live indicator ─── */
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .live-dot {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--accent-green);
+    animation: pulse 2s ease-in-out infinite; display: inline-block;
+  }
+
+  /* Toast */
+  .toast {
+    position: fixed; bottom: 20px; right: 20px; padding: 10px 20px;
+    background: var(--bg-3); border: 1px solid var(--accent-green); border-radius: 8px;
+    font-size: 12px; color: var(--accent-green); opacity: 0; transition: opacity 0.3s;
+    pointer-events: none; z-index: 100;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <h1>AGENT COMM <span style="font-size:11px;color:var(--text-dim);font-weight:400;margin-left:8px;">Audit Trail</span></h1>
+  <div class="header-right">
+    <span id="conn-status"><span class="dot dot-offline"></span> Disconnected</span>
+    <button class="btn-sm" onclick="toggleConfig()">⚙ Config</button>
+  </div>
+</div>
+
+<!-- Config Banner -->
+<div class="config-banner" id="configBanner">
+  <label>Supabase:</label>
+  <input type="text" id="cfgUrl" placeholder="Project URL (https://xxx.supabase.co)">
+  <input type="text" id="cfgKey" placeholder="Anon public key">
+  <button onclick="saveConfig()">Connect</button>
+</div>
+
+<!-- Stats Bar -->
+<div class="stats-bar" id="statsBar">
+  <div class="stat"><span class="stat-dot" style="background:var(--sent)"></span> Sent: <span class="stat-value" id="stat-sent">0</span></div>
+  <div class="stat"><span class="stat-dot" style="background:var(--delivered)"></span> Delivered: <span class="stat-value" id="stat-delivered">0</span></div>
+  <div class="stat"><span class="stat-dot" style="background:var(--read)"></span> Read: <span class="stat-value" id="stat-read">0</span></div>
+  <div class="stat"><span class="stat-dot" style="background:var(--executed)"></span> Executed: <span class="stat-value" id="stat-executed">0</span></div>
+  <div style="flex:1"></div>
+  <div class="stat"><span class="live-dot"></span> <span style="margin-left:4px;">Live</span></div>
+  <div class="stat">Total: <span class="stat-value" id="stat-total">0</span></div>
+</div>
+
+<!-- Filter Bar -->
+<div class="filter-bar">
+  <button class="filter-btn active" data-filter="all" onclick="setFilter('all',this)">All</button>
+  <button class="filter-btn" data-filter="CL" onclick="setFilter('CL',this)">CL</button>
+  <button class="filter-btn" data-filter="CE" onclick="setFilter('CE',this)">CE</button>
+  <button class="filter-btn" data-filter="command" onclick="setFilter('command',this)">Commands</button>
+  <button class="filter-btn" data-filter="inbox" onclick="setFilter('inbox',this)">Responses</button>
+  <button class="filter-btn" data-filter="sent" onclick="setFilter('sent',this)">⚡ Pending</button>
+  <span class="filter-spacer"></span>
+  <span class="msg-count" id="msgCount"></span>
+</div>
+
+<!-- Timeline -->
+<div class="timeline-wrap">
+  <div class="timeline" id="timeline">
+    <div class="empty-state" id="emptyState">
+      <h2>No messages yet</h2>
+      <p>Messages sent via MCP tools will appear here in real-time.</p>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+// ─── Config ──────────────────────────────────────────────────────────
+const AGENTS = ['CL', 'CE', 'ORCHESTRATOR'];
+let sbClient = null;
+let allMessages = [];
+let currentFilter = 'all';
+
+function getConfig() {
+  try { return JSON.parse(localStorage.getItem('agentcomm_config')); }
+  catch { return null; }
+}
+
+function saveConfig() {
+  const url = document.getElementById('cfgUrl').value.trim().replace(/\/+$/, '');
+  const key = document.getElementById('cfgKey').value.trim();
+  if (!url || !key) return;
+  localStorage.setItem('agentcomm_config', JSON.stringify({ url, key }));
+  document.getElementById('configBanner').classList.remove('show');
+  initSupabase();
+}
+
+function toggleConfig() {
+  const banner = document.getElementById('configBanner');
+  banner.classList.toggle('show');
+}
+
+function loadConfig() {
+  const cfg = getConfig();
+  if (cfg) {
+    document.getElementById('cfgUrl').value = cfg.url;
+    document.getElementById('cfgKey').value = cfg.key;
+  }
+}
+
+// ─── Supabase ────────────────────────────────────────────────────────
+function initSupabase() {
+  const cfg = getConfig();
+  if (!cfg) {
+    document.getElementById('configBanner').classList.add('show');
+    setConnectionStatus(false, 'No config');
+    return;
+  }
+  try {
+    sbClient = window.supabase.createClient(cfg.url, cfg.key);
+    setConnectionStatus(true);
+    loadMessages();
+    subscribeRealtime();
+  } catch (e) {
+    setConnectionStatus(false, e.message);
+  }
+}
+
+function setConnectionStatus(online, detail) {
+  const el = document.getElementById('conn-status');
+  if (online) {
+    el.innerHTML = '<span class="dot dot-online"></span> Connected';
+  } else {
+    el.innerHTML = `<span class="dot dot-offline"></span> ${detail || 'Disconnected'}`;
+  }
+}
+
+// ─── Load Messages ───────────────────────────────────────────────────
+async function loadMessages() {
+  const { data, error } = await sbClient
+    .from('messages')
+    .select('*')
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    console.error('Load error:', error);
+    return;
+  }
+
+  allMessages = data || [];
+  renderTimeline();
+}
+
+// ─── Realtime ────────────────────────────────────────────────────────
+function subscribeRealtime() {
+  sbClient
+    .channel('audit-trail')
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (payload) => {
+      allMessages.push(payload.new);
+      renderTimeline();
+      showToast(`New message from ${payload.new.from_agent}`);
+    })
+    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages' }, (payload) => {
+      const idx = allMessages.findIndex(m => m.id === payload.new.id);
+      if (idx >= 0) {
+        allMessages[idx] = payload.new;
+        renderTimeline();
+      }
+    })
+    .subscribe();
+}
+
+// ─── Render ──────────────────────────────────────────────────────────
+function renderTimeline() {
+  const timeline = document.getElementById('timeline');
+  const empty = document.getElementById('emptyState');
+
+  // Apply filter
+  const filtered = filterMessages(allMessages, currentFilter);
+
+  // Update stats
+  updateStats(allMessages);
+  document.getElementById('msgCount').textContent = `Showing ${filtered.length} of ${allMessages.length}`;
+
+  if (filtered.length === 0) {
+    empty.style.display = 'block';
+    // Remove all cards but keep empty state
+    timeline.querySelectorAll('.msg-card').forEach(c => c.remove());
+    return;
+  }
+  empty.style.display = 'none';
+
+  // Build HTML
+  const html = filtered.map(m => renderCard(m)).join('');
+  // Keep only cards, remove old ones
+  const existingEmpty = empty.outerHTML;
+  timeline.innerHTML = html + existingEmpty;
+
+  // Auto-scroll to bottom
+  const wrap = document.querySelector('.timeline-wrap');
+  wrap.scrollTop = wrap.scrollHeight;
+}
+
+function renderCard(m) {
+  const meta = parseMeta(m.metadata);
+  const priority = meta.priority || 'normal';
+  const msgType = meta.msg_type || m.channel;
+  const needsApproval = meta.needs_approval;
+  const refId = meta.ref_msg_id;
+
+  const fromClass = `agent-${m.from_agent}`;
+  const toClass = m.to_agent ? `agent-${m.to_agent}` : '';
+  const statusClass = `status-${m.status}`;
+
+  const ts = formatTime(m.created_at);
+  const shortId = m.id.substring(0, 8);
+
+  let directionHtml = '';
+  if (m.to_agent) {
+    directionHtml = `
+      <span class="direction-arrow">→</span>
+      <span class="agent-badge ${toClass}">${m.to_agent}</span>
+    `;
+  }
+
+  let priorityHtml = '';
+  if (priority === 'urgent' || needsApproval) {
+    priorityHtml = '<span class="priority-badge">URGENT</span>';
+  } else if (priority === 'high') {
+    priorityHtml = '<span class="priority-badge" style="background:rgba(245,166,35,0.2);color:var(--accent-orange)">HIGH</span>';
+  }
+
+  let refHtml = '';
+  if (refId) {
+    refHtml = `<span style="font-size:10px;color:var(--text-dim)">↩ re: ${refId.substring(0,8)}</span>`;
+  }
+
+  return `
+    <div class="msg-card ${statusClass}" data-id="${m.id}" data-from="${m.from_agent}" data-to="${m.to_agent || ''}" data-channel="${m.channel}" data-status="${m.status}">
+      <div class="msg-header">
+        <span class="agent-badge ${fromClass}">${m.from_agent}</span>
+        ${directionHtml}
+        <span class="channel-badge">${msgType}</span>
+        <span class="status-badge ${statusClass}">${m.status}</span>
+        ${priorityHtml}
+        ${refHtml}
+      </div>
+      <div class="msg-content">${escapeHtml(m.content)}</div>
+      <div class="msg-footer">
+        <span>${ts}</span>
+        <span class="msg-id" onclick="copyId('${m.id}')" title="Click to copy full ID">${shortId}</span>
+      </div>
+    </div>
+  `;
+}
+
+function parseMeta(metadata) {
+  if (!metadata) return {};
+  try {
+    return typeof metadata === 'string' ? JSON.parse(metadata) : metadata;
+  } catch { return {}; }
+}
+
+function formatTime(iso) {
+  const d = new Date(iso);
+  const month = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()];
+  const day = d.getDate();
+  const h = d.getHours().toString().padStart(2,'0');
+  const min = d.getMinutes().toString().padStart(2,'0');
+  const sec = d.getSeconds().toString().padStart(2,'0');
+  return `${month} ${day}, ${h}:${min}:${sec}`;
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// ─── Filters ─────────────────────────────────────────────────────────
+function filterMessages(msgs, filter) {
+  if (filter === 'all') return msgs;
+  if (filter === 'CL' || filter === 'CE') {
+    return msgs.filter(m => m.from_agent === filter || m.to_agent === filter);
+  }
+  if (filter === 'command' || filter === 'inbox') {
+    return msgs.filter(m => m.channel === filter);
+  }
+  if (filter === 'sent') {
+    return msgs.filter(m => m.status === 'sent');
+  }
+  return msgs;
+}
+
+function setFilter(filter, btn) {
+  currentFilter = filter;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderTimeline();
+}
+
+// ─── Stats ───────────────────────────────────────────────────────────
+function updateStats(msgs) {
+  const counts = { sent: 0, delivered: 0, read: 0, executed: 0 };
+  msgs.forEach(m => { if (counts[m.status] !== undefined) counts[m.status]++; });
+  document.getElementById('stat-sent').textContent = counts.sent;
+  document.getElementById('stat-delivered').textContent = counts.delivered;
+  document.getElementById('stat-read').textContent = counts.read;
+  document.getElementById('stat-executed').textContent = counts.executed;
+  document.getElementById('stat-total').textContent = msgs.length;
+}
+
+// ─── Utils ───────────────────────────────────────────────────────────
+function copyId(id) {
+  navigator.clipboard.writeText(id).then(() => showToast('ID copied'));
+}
+
+function showToast(text) {
+  const t = document.getElementById('toast');
+  t.textContent = text;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2000);
+}
+
+// ─── Init ────────────────────────────────────────────────────────────
+loadConfig();
+initSupabase();
+</script>
+</body>
+</html>
