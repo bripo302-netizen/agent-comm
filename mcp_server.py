@@ -24,6 +24,7 @@ Tools exposed:
     - mark_status     → update message status (delivered/read/executed)
     - post_response   → post a response back from this agent
     - get_audit_trail → fetch recent message history (all agents)
+    - bulk_archive    → mark all messages before a date as executed (cleanup)
 """
 
 import os
@@ -92,6 +93,20 @@ async def supabase_patch(path: str, data: dict) -> None:
         resp.raise_for_status()
 
 
+async def supabase_patch_count(path: str, data: dict) -> int:
+    """PATCH with count header — returns number of rows affected."""
+    headers = {**HEADERS, "Prefer": "return=representation,count=exact"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.patch(
+            f"{SUPABASE_URL}/rest/v1/{path}",
+            headers=headers,
+            json=data,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        return len(result) if isinstance(result, list) else 0
+
+
 # ─── MCP Server ───────────────────────────────────────────────────────
 app = Server("agent-comm")
 
@@ -141,6 +156,15 @@ async def list_tools() -> list[Tool]:
                         "type": "boolean",
                         "description": "Also include 'delivered' messages (default: false, only 'sent')",
                         "default": False,
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": "Only return messages after this ISO date (e.g. '2026-05-25'). Default: no filter.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max messages to return (default: 50). Set 0 for unlimited.",
+                        "default": 50,
                     },
                 },
             },
@@ -215,6 +239,34 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="bulk_archive",
+            description=(
+                "Mark all messages before a given date as 'executed'. "
+                "Use this to clean up old inbox messages after archiving them to disk. "
+                "Returns the count of messages updated."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "before_date": {
+                        "type": "string",
+                        "description": "ISO date (e.g. '2026-05-25'). All messages with created_at before this date will be marked 'executed'.",
+                    },
+                    "include_today": {
+                        "type": "boolean",
+                        "description": "If true, also archives messages FROM before_date (uses <=). Default: false (uses <).",
+                        "default": False,
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "If true, only count messages that WOULD be archived without changing them. Default: false.",
+                        "default": False,
+                    },
+                },
+                "required": ["before_date"],
+            },
+        ),
     ]
 
 
@@ -231,6 +283,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return await handle_mark_status(arguments)
         elif name == "get_audit_trail":
             return await handle_get_audit_trail(arguments)
+        elif name == "bulk_archive":
+            return await handle_bulk_archive(arguments)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
     except httpx.HTTPStatusError as e:
@@ -274,22 +328,27 @@ async def handle_send_message(args: dict) -> list[TextContent]:
 
 async def handle_check_inbox(args: dict) -> list[TextContent]:
     include_delivered = args.get("include_delivered", False)
+    since = args.get("since")
+    limit = args.get("limit", 50)
 
     if include_delivered:
         status_filter = "status=in.(sent,delivered)"
     else:
         status_filter = "status=eq.sent"
 
+    date_filter = f"&created_at=gte.{since}T00:00:00Z" if since else ""
+    limit_clause = f"&limit={limit}" if limit > 0 else ""
+
     # Check commands sent TO this agent
     commands = await supabase_get(
         f"messages?to_agent=eq.{AGENT_ID}&channel=eq.command&{status_filter}"
-        f"&order=created_at.asc&select=*"
+        f"{date_filter}{limit_clause}&order=created_at.asc&select=*"
     )
 
     # Check inbox responses directed at this agent (from other agents)
     responses = await supabase_get(
         f"messages?to_agent=eq.{AGENT_ID}&channel=eq.inbox&{status_filter}"
-        f"&order=created_at.asc&select=*"
+        f"{date_filter}{limit_clause}&order=created_at.asc&select=*"
     )
 
     # Also check general inbox posts from other agents (no specific to_agent)
@@ -297,7 +356,7 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         f"messages?channel=eq.inbox&{status_filter}"
         f"&from_agent=neq.{AGENT_ID}"
         f"&to_agent=is.null"
-        f"&order=created_at.asc&select=*"
+        f"{date_filter}{limit_clause}&order=created_at.asc&select=*"
     )
 
     all_msgs = commands + responses + general
@@ -308,7 +367,7 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
     lines = [f"📬 {len(all_msgs)} message(s) for {AGENT_ID}:\n"]
     for m in all_msgs:
         lines.append(
-            f"  [{m['id'][:8]}] {m['from_agent']} → {AGENT_ID} | "
+            f"  [{m['id']}] {m['from_agent']} → {AGENT_ID} | "
             f"{m['status']} | {m['channel']}\n"
             f"    {m['content']}\n"
             f"    Time: {m['created_at']}\n"
@@ -399,6 +458,61 @@ async def handle_get_audit_trail(args: dict) -> list[TextContent]:
         )
 
     return [TextContent(type="text", text="\n".join(lines))]
+
+
+async def handle_bulk_archive(args: dict) -> list[TextContent]:
+    before_date = args["before_date"]
+    include_today = args.get("include_today", False)
+    dry_run = args.get("dry_run", False)
+
+    # Validate date format
+    try:
+        datetime.strptime(before_date, "%Y-%m-%d")
+    except ValueError:
+        return [TextContent(
+            type="text",
+            text=f"Invalid date format: '{before_date}'. Use YYYY-MM-DD.",
+        )]
+
+    op = "lte" if include_today else "lt"
+    date_ts = f"{before_date}T00:00:00Z"
+    filter_path = (
+        f"messages?created_at={op}.{date_ts}"
+        f"&status=in.(sent,delivered,read)"
+    )
+
+    if dry_run:
+        # Count only
+        msgs = await supabase_get(f"{filter_path}&select=id,status,created_at")
+        status_counts = {}
+        for m in msgs:
+            s = m["status"]
+            status_counts[s] = status_counts.get(s, 0) + 1
+        breakdown = ", ".join(f"{s}: {c}" for s, c in sorted(status_counts.items()))
+        return [TextContent(
+            type="text",
+            text=(
+                f"DRY RUN — {len(msgs)} message(s) would be archived.\n"
+                f"  Filter: created_at {op} {date_ts}, status in (sent, delivered, read)\n"
+                f"  Breakdown: {breakdown or 'none'}"
+            ),
+        )]
+
+    # Execute the bulk update
+    count = await supabase_patch_count(
+        filter_path,
+        {"status": "executed"},
+    )
+
+    return [TextContent(
+        type="text",
+        text=(
+            f"✅ Archived {count} message(s).\n"
+            f"  Filter: created_at {op} {date_ts}\n"
+            f"  All matching sent/delivered/read → executed.\n"
+            f"  check_inbox will no longer return these messages."
+        ),
+    )]
 
 
 # ─── Entry point ──────────────────────────────────────────────────────
