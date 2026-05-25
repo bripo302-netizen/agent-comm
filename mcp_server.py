@@ -331,45 +331,63 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
     since = args.get("since")
     limit = args.get("limit", 50)
 
+    # Build allowed statuses
+    allowed = {"sent"}
     if include_delivered:
-        status_filter = "status=in.(sent,delivered)"
-    else:
-        status_filter = "status=eq.sent"
+        allowed.add("delivered")
 
-    date_filter = f"&created_at=gte.{since}T00:00:00Z" if since else ""
-    limit_clause = f"&limit={limit}" if limit > 0 else ""
+    # Use params dict (not URL-embedded) so httpx doesn't mangle filters
+    base_params = {"order": "created_at.asc", "select": "*"}
+    if since:
+        base_params["created_at"] = f"gte.{since}T00:00:00Z"
 
-    # Check commands sent TO this agent
-    commands = await supabase_get(
-        f"messages?to_agent=eq.{AGENT_ID}&channel=eq.command&{status_filter}"
-        f"{date_filter}{limit_clause}&order=created_at.asc&select=*"
-    )
+    # Query 1: commands sent TO this agent
+    p1 = {**base_params, "to_agent": f"eq.{AGENT_ID}", "channel": "eq.command"}
+    commands = await supabase_get("messages", params=p1)
 
-    # Check inbox responses directed at this agent (from other agents)
-    responses = await supabase_get(
-        f"messages?to_agent=eq.{AGENT_ID}&channel=eq.inbox&{status_filter}"
-        f"{date_filter}{limit_clause}&order=created_at.asc&select=*"
-    )
+    # Query 2: inbox responses directed at this agent
+    p2 = {**base_params, "to_agent": f"eq.{AGENT_ID}", "channel": "eq.inbox"}
+    responses = await supabase_get("messages", params=p2)
 
-    # Also check general inbox posts from other agents (no specific to_agent)
-    general = await supabase_get(
-        f"messages?channel=eq.inbox&{status_filter}"
-        f"&from_agent=neq.{AGENT_ID}"
-        f"&to_agent=is.null"
-        f"{date_filter}{limit_clause}&order=created_at.asc&select=*"
-    )
+    # Query 3: general inbox posts from other agents (no to_agent)
+    p3 = {
+        **base_params,
+        "channel": "eq.inbox",
+        "from_agent": f"neq.{AGENT_ID}",
+        "to_agent": "is.null",
+    }
+    general = await supabase_get("messages", params=p3)
 
-    all_msgs = commands + responses + general
+    # Python-side filtering (safety net if PostgREST filters fail)
+    all_msgs = [m for m in (commands + responses + general) if m["status"] in allowed]
+
+    # Deduplicate by id (3 queries may overlap)
+    seen = set()
+    deduped = []
+    for m in all_msgs:
+        if m["id"] not in seen:
+            seen.add(m["id"])
+            deduped.append(m)
+    all_msgs = deduped
+
+    # Apply limit
+    if limit > 0:
+        all_msgs = all_msgs[:limit]
 
     if not all_msgs:
         return [TextContent(type="text", text=f"No new messages for {AGENT_ID}.")]
 
+    # Truncate long content to keep output manageable
+    MAX_CONTENT = 300
     lines = [f"📬 {len(all_msgs)} message(s) for {AGENT_ID}:\n"]
     for m in all_msgs:
+        content = m["content"]
+        if len(content) > MAX_CONTENT:
+            content = content[:MAX_CONTENT] + f"... [{len(m['content'])} chars total]"
         lines.append(
-            f"  [{m['id']}] {m['from_agent']} → {AGENT_ID} | "
+            f"  [{m['id'][:8]}] {m['from_agent']} → {AGENT_ID} | "
             f"{m['status']} | {m['channel']}\n"
-            f"    {m['content']}\n"
+            f"    {content}\n"
             f"    Time: {m['created_at']}\n"
         )
 
